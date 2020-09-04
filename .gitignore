@@ -1,3 +1,6 @@
 .venv
 .idea
-data/
+data/folds
+*.zip
+utils_*
+run_*

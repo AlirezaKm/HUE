@@ -30,7 +30,7 @@ You can read the `run.py` file and do the same as that (e.g. change it how you w
 $ python ./run.py
 ```
 
-#### Directorie
+#### Directories and Files
 
 | Path         | Description     |
 | :----------- | :-------------  |
