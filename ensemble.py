@@ -17,7 +17,11 @@ class HashBasedUndersamplingEnsemble:
     ]
 
     SUPPORTED_SMPLINGS = [
-        RECIPROCAL, RANDOM, LINEARITY, NEGATIVE_EXPONENT, LIMIT
+        RECIPROCAL,
+        RANDOM,
+        LINEARITY,
+        NEGATIVE_EXPONENT,
+        LIMIT
     ]
 
     def __init__(
@@ -25,8 +29,7 @@ class HashBasedUndersamplingEnsemble:
             base_estimator,
             sampling: str = RECIPROCAL,
             n_iterations: int = 50,
-            random_state: int = None,
-            normalization: bool = False,
+            random_state: int = None
     ):
         """
         Hashing-Based Undersampling Ensemble for Imbalanced Pattern Classification Problems
@@ -44,8 +47,6 @@ class HashBasedUndersamplingEnsemble:
         :param random_state: int (default = None)
             random state for Iterative Quantization
 
-        :param normalization: bool (default = False)
-            normalize the data
         """
         self.base_estimator = base_estimator
 
@@ -66,9 +67,6 @@ class HashBasedUndersamplingEnsemble:
         # store classifiers
         self.classifiers: List = list()
 
-        # normalization condition
-        self.normalization: bool = normalization
-
     def _check_fitted(self):
         assert self._is_fitted, 'fit function not called yet'
 
@@ -88,11 +86,36 @@ class HashBasedUndersamplingEnsemble:
                 raise NotImplementedError('Just binary class supported'
                                           ', multi class not supported yet')
 
-        if self.normalization:
-            # Centered Data (normalization step)
-            X = X - np.mean(X, axis=0)
+            # Get indexes of sorted number of each class
+            sorted_indexes = np.argsort(self.n_classes_)
+
+            # Label of each class
+            self.minC, self.majC = self.classes_[sorted_indexes]
+
+            # Number of each class
+            self._nMin, self._nMaj = self.n_classes_[sorted_indexes]
+
+            # get indexes of minority and majority classes
+            self._minIndexes = np.where(y != self.majC)[0]
+            self._majIndexes = np.where(y == self.majC)[0]
+
+            # separate X and Y of majority class from whole data
+            self._majX, self._majY = X[self._majIndexes], y[self._majIndexes]
 
         return X, y
+
+    def _sign(self, X: np.array) -> np.array:
+        """Sign
+
+        Apply Sign function over X
+
+        :param X: np.array
+            Input
+
+        :return np.array
+            Sign(X)
+        """
+        return np.where(X >= 0, 1, -1)
 
     def _itq(self, X: np.array):
         """Iterative Quantitization
@@ -112,12 +135,12 @@ class HashBasedUndersamplingEnsemble:
         # Find Optimal Rotation
         for _ in range(self.n_iterations):
             V = X @ R
-            [U, _, VT] = svd(np.sign(V).T @ X)
+            [U, _, VT] = svd(self._sign(V).T @ X)
             R = (VT @ U.T)
 
         return R
 
-    def _sampling(self, X: np.array, subspace: np.array, nMin: int):
+    def _sampling(self, X: np.array, subspace: np.array):
         """Sampling Methods
         1. Reciprocal
         2. All Random
@@ -136,8 +159,7 @@ class HashBasedUndersamplingEnsemble:
 
         if self.sampling == self.RANDOM:
             """All Random"""
-            # weights = np.ones((n_samples,)) * 0.5
-            return np.random.choice(n_samples, nMin)
+            return np.random.choice(n_samples, self._nMin)
 
         elif self.sampling == self.LINEARITY:
             """Linearity"""
@@ -172,7 +194,7 @@ class HashBasedUndersamplingEnsemble:
 
         # Sort weights by their weights and so Pick Nmin samples due to weight
         # distribution to form the training subset
-        return np.argsort(weights)[::-1][:nMin]
+        return np.argsort(weights)[::-1][:self._nMin]
 
     def fit(self, X: np.array, y: np.array):
         """Fitting Function
@@ -183,23 +205,14 @@ class HashBasedUndersamplingEnsemble:
         y: np.array (n_samples,)
             labels vector
         """
+
         # Validate X and y
         X, y = self._check_Xy(X, y)
 
-        # TODO###############################[REFACTORE NEEDED]################################
-        argsort = np.argsort(self.n_classes_)
-        Cmin, Cmaj = self.classes_[argsort]
-        Nmin, Nmaj = self.n_classes_[argsort]
-
-        min_indexes = np.where(y != Cmaj)[0]
-        maj_indexes = np.where(y == Cmaj)[0]
-
-        Xmaj, ymaj = X[maj_indexes], y[maj_indexes]
-        # TODO##################################################################################
-
         # Get number of Bits
+        # (we need to handle this value for PCA projection conditions, like n_components for solvers)
         self.n_bits = np.min([
-            np.ceil(np.log2(3 * Nmaj / Nmin)).astype(np.int),
+            np.ceil(np.log2(3 * self._nMaj / self._nMin)).astype(np.int),
             *X.shape
         ])
 
@@ -207,13 +220,13 @@ class HashBasedUndersamplingEnsemble:
         self.pca = PCA(n_components=self.n_bits)
 
         # Transform X
-        V = self.pca.fit_transform(Xmaj)
+        V = self.pca.fit_transform(self._majX)
 
         # Using Iterative Quantitization (Rotation Matrix)
         self.R = self._itq(V)
 
         # V x R
-        U = np.sign(V @ self.R).astype(np.int)
+        U = self._sign(V @ self.R).astype(np.int)
 
         # Assign each sample to Hash Code Subspace
         Q = np.packbits(np.where(U < 0, 0, U), axis=1, bitorder='little')
@@ -221,14 +234,14 @@ class HashBasedUndersamplingEnsemble:
         for subspace in range(np.power(2, self.n_bits)):
 
             # Pick Nmin samples due to weight distribution w to form the training subset
-            selected = self._sampling(Q, subspace, Nmin)
+            selected = self._sampling(Q, subspace)
+
+            # Prepare training data for classifier
+            X_ = np.concatenate((X[self._minIndexes], self._majX[selected]))
+            y_ = np.concatenate((y[self._minIndexes], self._majY[selected]))
 
             # Train base classifier C using T and minority samples
             C = deepcopy(self.base_estimator)
-
-            # TODO: refactor it
-            X_ = np.concatenate((X[min_indexes], Xmaj[selected]))
-            y_ = np.concatenate((y[min_indexes], ymaj[selected]))
 
             # store all classifiers for prediction step
             self.classifiers.append(C.fit(X_, y_))
@@ -249,4 +262,5 @@ class HashBasedUndersamplingEnsemble:
         ], axis=0)
 
         # Apply sign function over result of classifiers
-        return np.sign(H)
+        # FIXME: what about other labels ? what if the labels be something else 1 and -1 ?
+        return self._sign(H)
